@@ -1,10 +1,10 @@
 /*
  ============================================================================
- Name        : desfire-tools.c
+ Name        : mifare-desfire-analyze.c
  Author      : Henryk Plötz
  Version     :
  Copyright   : (c) 2013 Henryk Plötz
- Description : Hello World in C, Ansi-style
+ Description : Analyze a Mifare DESfire card
  ============================================================================
  */
 
