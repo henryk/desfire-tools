@@ -170,14 +170,34 @@ static int analyze_app(MifareTag tag, struct mifare_desfire_application_informat
 	uint8_t *files = NULL;
 	size_t count = 0;
 	MifareDESFireAID aid = mifare_desfire_aid_new(ai->aid);
+	MifareDESFireKey aes_key = NULL, des_key = NULL;
+	uint8_t null_key[16] = {0};
 
 	if(aid == NULL) {
+		goto abort;
+	}
+
+	des_key = mifare_desfire_des_key_new(null_key);
+	aes_key = mifare_desfire_aes_key_new(null_key);
+
+	if(des_key == NULL || aes_key == NULL) {
 		goto abort;
 	}
 
 	int r = mifare_desfire_select_application(tag, aid);
 	if(r < 0) {
 		goto abort;
+	}
+
+	// FIXME: In principle it should be possible to distinguish authentication modes without knowing the key by looking at the first response (which is either AE right away or AF first)
+	r = mifare_desfire_authenticate(tag, 0, des_key);
+	if(r >= 0) {
+		ai->authentication_mode = MIFARE_DESFIRE_AUTHENTICATION_MODE_DES;
+	}
+
+	r = mifare_desfire_authenticate(tag, 0, aes_key);
+	if(r >= 0) {
+		ai->authentication_mode = MIFARE_DESFIRE_AUTHENTICATION_MODE_AES;
 	}
 
 	r = mifare_desfire_get_file_ids(tag, &files, &count);
@@ -231,6 +251,12 @@ abort:
 	if(files != NULL) {
 		free(files);
 	}
+	if(aes_key != NULL) {
+		mifare_desfire_key_free(aes_key);
+	}
+	if(des_key != NULL) {
+		mifare_desfire_key_free(des_key);
+	}
 	return retval;
 }
 
@@ -278,6 +304,18 @@ static void print_information(const struct mifare_desfire_card_information *ci)
 			continue;
 		}
 		printf("\t== App %06X ==\n", ci->app[i].aid);
+
+		switch(ci->app[i].authentication_mode) {
+		case MIFARE_DESFIRE_AUTHENTICATION_MODE_UNKNOWN:
+			printf("\t\t + Unknown authentication\n");
+			break;
+		case MIFARE_DESFIRE_AUTHENTICATION_MODE_AES:
+			printf("\t\t + AES authentication\n");
+			break;
+		case MIFARE_DESFIRE_AUTHENTICATION_MODE_DES:
+			printf("\t\t + DES authentication\n");
+			break;
+		}
 
 		for(size_t j=0; j<ARRAY_SIZE(ci->app[i].file); j++) {
 			if(!ci->app[i].file[j].file_present) {
