@@ -164,23 +164,65 @@ static void analyze_file(MifareTag tag, struct mifare_desfire_file_information *
 	}
 }
 
+enum try_key_result {
+	TRY_KEY_RESULT_ERROR,
+	TRY_KEY_RESULT_KEY_NO_INVALID,
+	TRY_KEY_RESULT_AUTH_MODE_INVALID,
+	TRY_KEY_RESULT_OK,
+};
+
+static enum try_key_result try_auth(MifareTag tag, uint8_t auth_mode, uint8_t key_no)
+{
+	// "MifareTag" is struct mifare_desfire_tag, its first member is struct mifare_tag whose first member is nfc_device*,
+	//  so derefencing a MifareTag should lead to an nfc_device pointer.
+	nfc_device *dev = *(nfc_device**)tag;
+	uint8_t outbuf[100];
+	size_t outbuf_length = 0;
+	uint8_t inbuf[100];
+	size_t inbuf_length = sizeof(inbuf);
+
+	// Logic assembled from mifare_desfire.c and by looking at traces:
+	//  Outgoing is an ISO 7816 APDU with CLA 90, INS = auth_mode, P1 = P2 = 0, Lc = 1, Body = key_no, Le = 0
+	outbuf[0] = 0x90;
+	outbuf[1] = auth_mode;
+	outbuf[2] = outbuf[3] = 0;
+	outbuf[4] = 1;
+	outbuf[5] = key_no;
+	outbuf[6] = 0;
+	outbuf_length = 7;
+
+	int r = nfc_initiator_transceive_bytes(dev, outbuf, outbuf_length, inbuf, inbuf_length, 0);
+
+	if(r == 2) {
+		// Card sent an error code in SW2. From experiments:
+		if(inbuf[1] == 0x40) {
+			// Key number invalid
+			return TRY_KEY_RESULT_KEY_NO_INVALID;
+		} else if(inbuf[1] == 0xAE) {
+			return TRY_KEY_RESULT_AUTH_MODE_INVALID;
+		} else {
+			return TRY_KEY_RESULT_ERROR;
+		}
+	} else if(r > 2) {
+		// Card sent a challenge back, meaning it accepts the authentication mode and key.
+		// In order for it to abort the authentication attempt, we need to send another command, but don't care about the result
+		outbuf[1] = 0xaf;
+		nfc_initiator_transceive_bytes(dev, outbuf, outbuf_length, inbuf, inbuf_length, 0);
+		return TRY_KEY_RESULT_OK;
+	} else {
+		// Card sent nothing back, it's either gone or something else went wrong
+		return TRY_KEY_RESULT_ERROR;
+	}
+}
+
 static int analyze_app(MifareTag tag, struct mifare_desfire_application_information *ai)
 {
 	int retval = -1;
 	uint8_t *files = NULL;
 	size_t count = 0;
 	MifareDESFireAID aid = mifare_desfire_aid_new(ai->aid);
-	MifareDESFireKey aes_key = NULL, des_key = NULL;
-	uint8_t null_key[16] = {0};
 
 	if(aid == NULL) {
-		goto abort;
-	}
-
-	des_key = mifare_desfire_des_key_new(null_key);
-	aes_key = mifare_desfire_aes_key_new(null_key);
-
-	if(des_key == NULL || aes_key == NULL) {
 		goto abort;
 	}
 
@@ -189,15 +231,31 @@ static int analyze_app(MifareTag tag, struct mifare_desfire_application_informat
 		goto abort;
 	}
 
-	// FIXME: In principle it should be possible to distinguish authentication modes without knowing the key by looking at the first response (which is either AE right away or AF first)
-	r = mifare_desfire_authenticate(tag, 0, des_key);
-	if(r >= 0) {
+	// First determine the authentication mode
+	uint8_t auth_mode = 0;
+	r = try_auth(tag, 0x0a, 0);
+	if(r == TRY_KEY_RESULT_OK) {
 		ai->authentication_mode = MIFARE_DESFIRE_AUTHENTICATION_MODE_DES;
+		auth_mode = 0x0a;
+	} else {
+		r = try_auth(tag, 0xaa, 0);
+		if(r == TRY_KEY_RESULT_OK) {
+			ai->authentication_mode = MIFARE_DESFIRE_AUTHENTICATION_MODE_AES;
+			auth_mode = 0xaa;
+		}
 	}
 
-	r = mifare_desfire_authenticate(tag, 0, aes_key);
-	if(r >= 0) {
-		ai->authentication_mode = MIFARE_DESFIRE_AUTHENTICATION_MODE_AES;
+	// Now, if we know it, try to enumerate keys
+	if(auth_mode != 0) {
+		for(size_t i=1; i<16; i++) {
+			r = try_auth(tag, auth_mode, i);
+			if(r == TRY_KEY_RESULT_KEY_NO_INVALID) {
+				ai->max_keys = i;
+				break;
+			} else if(r != TRY_KEY_RESULT_OK) {
+				break;
+			}
+		}
 	}
 
 	r = mifare_desfire_get_file_ids(tag, &files, &count);
@@ -251,12 +309,6 @@ abort:
 	if(files != NULL) {
 		free(files);
 	}
-	if(aes_key != NULL) {
-		mifare_desfire_key_free(aes_key);
-	}
-	if(des_key != NULL) {
-		mifare_desfire_key_free(des_key);
-	}
 	return retval;
 }
 
@@ -270,6 +322,19 @@ static int analyze_tag(MifareTag tag, struct mifare_desfire_card_information *ci
 
 	if(get_uid(tag, ci) < 0) {
 		goto abort;
+	}
+
+	int r = mifare_desfire_select_application(tag, NULL);
+	if(r >= 0) {
+		r = try_auth(tag, 0x0a, 0);
+		if(r == TRY_KEY_RESULT_OK) {
+			ci->authentication_mode = MIFARE_DESFIRE_AUTHENTICATION_MODE_DES;
+		} else {
+			r = try_auth(tag, 0xaa, 0);
+			if(r == TRY_KEY_RESULT_OK) {
+				ci->authentication_mode = MIFARE_DESFIRE_AUTHENTICATION_MODE_AES;
+			}
+		}
 	}
 
 	get_application_list(tag, ci);
@@ -298,6 +363,17 @@ static void print_information(const struct mifare_desfire_card_information *ci)
 	if(!ci->aids_retrieved) {
 		printf("\t + AID list could not be retrieved\n");
 	}
+	switch(ci->authentication_mode) {
+	case MIFARE_DESFIRE_AUTHENTICATION_MODE_UNKNOWN:
+		printf("\t + Unknown authentication\n");
+		break;
+	case MIFARE_DESFIRE_AUTHENTICATION_MODE_AES:
+		printf("\t + AES authentication\n");
+		break;
+	case MIFARE_DESFIRE_AUTHENTICATION_MODE_DES:
+		printf("\t + DES authentication\n");
+		break;
+	}
 
 	for(size_t i=0; i<ARRAY_SIZE(ci->app); i++) {
 		if(ci->app[i].aid == 0) {
@@ -311,9 +387,11 @@ static void print_information(const struct mifare_desfire_card_information *ci)
 			break;
 		case MIFARE_DESFIRE_AUTHENTICATION_MODE_AES:
 			printf("\t\t + AES authentication\n");
+			printf("\t\t + App has %i keys\n", ci->app[i].max_keys);
 			break;
 		case MIFARE_DESFIRE_AUTHENTICATION_MODE_DES:
 			printf("\t\t + DES authentication\n");
+			printf("\t\t + App has %i keys\n", ci->app[i].max_keys);
 			break;
 		}
 
