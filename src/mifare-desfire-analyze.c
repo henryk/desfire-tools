@@ -33,6 +33,15 @@ const uint32_t WELL_KNOWN_AIDS[] = {
 		0xFF77CF, // DOPE
 };
 
+const struct {
+	size_t key_length;
+	uint8_t key[24];
+} WELL_KNOWN_KEYS[] = {
+		{8, {0}},
+		{16, {0}},
+		{24, {0}},
+};
+
 struct mifare_desfire_card_information {
 	char *uid;
 	bool random_uid;
@@ -46,6 +55,18 @@ struct mifare_desfire_card_information {
 		MIFARE_DESFIRE_AUTHENTICATION_MODE_DES,
 		MIFARE_DESFIRE_AUTHENTICATION_MODE_AES,
 	} authentication_mode;
+
+	struct key_information {
+		enum key_information_result {
+			KEY_INFORMATION_RESULT_UNKNOWN,
+			KEY_INFORMATION_RESULT_DES,
+			KEY_INFORMATION_RESULT_3DES,
+			KEY_INFORMATION_RESULT_3K3DES,
+			KEY_INFORMATION_RESULT_AES,
+		} key_information_result;
+		uint8_t key[24];
+		size_t key_length;
+	} key_information;
 
 	struct mifare_desfire_application_information {
 		uint32_t aid;
@@ -66,6 +87,8 @@ struct mifare_desfire_card_information {
 			} file_type;
 			size_t file_length;
 		} file[32];
+
+		struct key_information key_information[14];
 	} app[28];
 	bool aids_retrieved;
 };
@@ -161,6 +184,79 @@ static void analyze_file(MifareTag tag, struct mifare_desfire_file_information *
 	r = mifare_desfire_get_value_ex(tag, fi->file_id, &val, 0);
 	if(r>=0 || mifare_desfire_last_picc_error(tag) != PERMISSION_ERROR) {
 		fi->file_type = MIFARE_DESFIRE_FILE_TYPE_VALUE;
+	}
+}
+
+static void try_keys(MifareTag tag, enum mifare_desfire_authentication_mode authentication_mode, size_t num_keys, struct key_information *ki)
+{
+	for(size_t i=0; i<num_keys; i++) {
+		for(size_t j=0; j<ARRAY_SIZE(WELL_KNOWN_KEYS); j++) {
+			if(authentication_mode == MIFARE_DESFIRE_AUTHENTICATION_MODE_AES) {
+				if(WELL_KNOWN_KEYS[j].key_length != 16) {
+					continue;
+				}
+			}
+
+			MifareDESFireKey kdes = NULL, k3des = NULL, k3k3des = NULL, kaes = NULL;
+			switch(WELL_KNOWN_KEYS[j].key_length) {
+			case 8:
+				kdes = mifare_desfire_des_key_new((uint8_t*)WELL_KNOWN_KEYS[j].key);
+				break;
+			case 16:
+				k3des = mifare_desfire_3des_key_new((uint8_t*)WELL_KNOWN_KEYS[j].key);
+				kaes = mifare_desfire_aes_key_new((uint8_t*)WELL_KNOWN_KEYS[j].key);
+				break;
+			case 24:
+				k3k3des = mifare_desfire_3k3des_key_new((uint8_t*)WELL_KNOWN_KEYS[j].key);
+				break;
+			default:
+				continue;
+			}
+
+			if(ki[i].key_information_result == KEY_INFORMATION_RESULT_UNKNOWN && kdes != NULL) {
+				if(mifare_desfire_authenticate(tag, i, kdes) >= 0) {
+					ki[i].key_information_result = KEY_INFORMATION_RESULT_DES;
+				}
+			}
+
+			if(ki[i].key_information_result == KEY_INFORMATION_RESULT_UNKNOWN && k3des != NULL) {
+				if(mifare_desfire_authenticate(tag, i, k3des) >= 0) {
+					ki[i].key_information_result = KEY_INFORMATION_RESULT_3DES;
+				}
+			}
+
+			if(ki[i].key_information_result == KEY_INFORMATION_RESULT_UNKNOWN && k3k3des != NULL) {
+				if(mifare_desfire_authenticate(tag, i, k3k3des) >= 0) {
+					ki[i].key_information_result = KEY_INFORMATION_RESULT_3K3DES;
+				}
+			}
+
+			if(ki[i].key_information_result == KEY_INFORMATION_RESULT_UNKNOWN && kaes != NULL) {
+				if(mifare_desfire_authenticate(tag, i, kaes) >= 0) {
+					ki[i].key_information_result = KEY_INFORMATION_RESULT_AES;
+				}
+			}
+
+			if(kdes != NULL) {
+				mifare_desfire_key_free(kdes);
+			}
+			if(k3des != NULL) {
+				mifare_desfire_key_free(k3des);
+			}
+			if(k3k3des != NULL) {
+				mifare_desfire_key_free(k3k3des);
+			}
+			if(kaes != NULL) {
+				mifare_desfire_key_free(kaes);
+			}
+
+			if(ki[i].key_information_result != KEY_INFORMATION_RESULT_UNKNOWN) {
+				memcpy(ki[i].key, WELL_KNOWN_KEYS[j].key, WELL_KNOWN_KEYS[j].key_length);
+				ki[i].key_length = WELL_KNOWN_KEYS[j].key_length;
+				break;
+			}
+
+		}
 	}
 }
 
@@ -263,6 +359,8 @@ static int analyze_app(MifareTag tag, struct mifare_desfire_application_informat
 		}
 	}
 
+	try_keys(tag, ai->authentication_mode, ai->max_keys, ai->key_information);
+
 	r = mifare_desfire_get_file_ids(tag, &files, &count);
 	if(r >= 0) {
 		if(count >= ARRAY_SIZE(ai->file)) {
@@ -347,6 +445,8 @@ static int analyze_tag(MifareTag tag, struct mifare_desfire_card_information *ci
 		ci->key_settings_retrieved = 1;
 	}
 
+	try_keys(tag, ci->authentication_mode, 1, &(ci->key_information));
+
 	get_application_list(tag, ci);
 	if(!ci->aids_retrieved) {
 		try_well_known_aids(tag, ci);
@@ -363,10 +463,10 @@ abort:
 	return retval;
 }
 
-static void print_key_settings(int master, uint8_t key_settings)
+static void print_key_settings(int app, uint8_t key_settings)
 {
 	const char *indent = "\t";
-	if(master) {
+	if(app) {
 		indent = "\t\t";
 	}
 
@@ -387,6 +487,43 @@ static void print_key_settings(int master, uint8_t key_settings)
 		printf("%s\t + Allow changing the Master Key\n", indent);
 	}
 
+}
+
+static void print_keys(int app, size_t num_keys, const struct key_information *ki)
+{
+	const char *indent = "\t";
+	if(app) {
+		indent = "\t\t";
+	}
+
+	for(size_t i=0; i<num_keys; i++) {
+		if(ki[i].key_information_result == KEY_INFORMATION_RESULT_UNKNOWN) {
+			continue;
+		}
+		printf("%s + Found key %zi:\n", indent, i);
+		switch(ki[i].key_information_result) {
+		case KEY_INFORMATION_RESULT_DES:
+			printf("%s\t + Key type DES\n", indent);
+			break;
+		case KEY_INFORMATION_RESULT_3DES:
+			printf("%s\t + Key type 3DES\n", indent);
+			break;
+		case KEY_INFORMATION_RESULT_3K3DES:
+			printf("%s\t + Key type 3K3DES\n", indent);
+			break;
+		case KEY_INFORMATION_RESULT_AES:
+			printf("%s\t + Key type AES\n", indent);
+			break;
+		default:
+			printf("%s\t + Unknown key type\n", indent);
+			break;
+		}
+		printf("%s\t + Key", indent);
+		for(size_t j=0; j<ki[i].key_length; j++) {
+			printf(" %02X", ki[i].key[j]);
+		}
+		printf("\n");
+	}
 }
 
 static void print_information(const struct mifare_desfire_card_information *ci)
@@ -413,6 +550,7 @@ static void print_information(const struct mifare_desfire_card_information *ci)
 	if(ci->key_settings_retrieved) {
 		print_key_settings(0, ci->key_settings);
 	}
+	print_keys(0, 1, &(ci->key_information));
 
 	for(size_t i=0; i<ARRAY_SIZE(ci->app); i++) {
 		if(ci->app[i].aid == 0) {
@@ -436,6 +574,8 @@ static void print_information(const struct mifare_desfire_card_information *ci)
 		if(ci->app[i].key_settings_retrieved) {
 			print_key_settings(1, ci->app[i].key_settings);
 		}
+		print_keys(1, ci->app[i].max_keys, ci->app[i].key_information);
+
 
 		for(size_t j=0; j<ARRAY_SIZE(ci->app[i].file); j++) {
 			if(!ci->app[i].file[j].file_present) {
