@@ -231,6 +231,11 @@ static int analyze_app(MifareTag tag, struct mifare_desfire_application_informat
 		goto abort;
 	}
 
+	r = mifare_desfire_get_key_settings(tag, &ai->key_settings, &ai->max_keys);
+	if(r == 0) {
+		ai->key_settings_retrieved = 1;
+	}
+
 	// First determine the authentication mode
 	uint8_t auth_mode = 0;
 	r = try_auth(tag, 0x0a, 0);
@@ -246,7 +251,7 @@ static int analyze_app(MifareTag tag, struct mifare_desfire_application_informat
 	}
 
 	// Now, if we know it, try to enumerate keys
-	if(auth_mode != 0) {
+	if(!ai->key_settings_retrieved && auth_mode != 0) {
 		for(size_t i=1; i<16; i++) {
 			r = try_auth(tag, auth_mode, i);
 			if(r == TRY_KEY_RESULT_KEY_NO_INVALID) {
@@ -337,6 +342,11 @@ static int analyze_tag(MifareTag tag, struct mifare_desfire_card_information *ci
 		}
 	}
 
+	r = mifare_desfire_get_key_settings(tag, &ci->key_settings, &ci->max_keys);
+	if(r == 0) {
+		ci->key_settings_retrieved = 1;
+	}
+
 	get_application_list(tag, ci);
 	if(!ci->aids_retrieved) {
 		try_well_known_aids(tag, ci);
@@ -351,6 +361,32 @@ static int analyze_tag(MifareTag tag, struct mifare_desfire_card_information *ci
 
 abort:
 	return retval;
+}
+
+static void print_key_settings(int master, uint8_t key_settings)
+{
+	const char *indent = "\t";
+	if(master) {
+		indent = "\t\t";
+	}
+
+	printf("%s + Key settings (0x%02x):\n", indent, key_settings);
+	if(key_settings & 0x08) {
+		printf("%s\t + Configuration changeable\n", indent);
+	}
+
+	if(key_settings & 0x04) {
+		printf("%s\t + PICC Master Key not required for create / delete\n", indent);
+	}
+
+	if(key_settings & 0x02) {
+		printf("%s\t + Free directory list access without PICC Master Key\n", indent);
+	}
+
+	if(key_settings & 0x01) {
+		printf("%s\t + Allow changing the Master Key\n", indent);
+	}
+
 }
 
 static void print_information(const struct mifare_desfire_card_information *ci)
@@ -374,6 +410,9 @@ static void print_information(const struct mifare_desfire_card_information *ci)
 		printf("\t + DES authentication\n");
 		break;
 	}
+	if(ci->key_settings_retrieved) {
+		print_key_settings(0, ci->key_settings);
+	}
 
 	for(size_t i=0; i<ARRAY_SIZE(ci->app); i++) {
 		if(ci->app[i].aid == 0) {
@@ -393,6 +432,9 @@ static void print_information(const struct mifare_desfire_card_information *ci)
 			printf("\t\t + DES authentication\n");
 			printf("\t\t + App has %i keys\n", ci->app[i].max_keys);
 			break;
+		}
+		if(ci->app[i].key_settings_retrieved) {
+			print_key_settings(1, ci->app[i].key_settings);
 		}
 
 		for(size_t j=0; j<ARRAY_SIZE(ci->app[i].file); j++) {
