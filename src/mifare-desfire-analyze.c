@@ -42,6 +42,8 @@ const struct {
 		{24, {0}},
 };
 
+#define RFERROR(tag) (nfc_device_get_last_error(*(nfc_device**)tag) == NFC_ERFTRANS)
+
 struct mifare_desfire_card_information {
 	char *uid;
 	bool random_uid;
@@ -158,6 +160,10 @@ static void try_well_known_aids(MifareTag tag, struct mifare_desfire_card_inform
 		}
 		free(aid);
 
+		if(RFERROR(tag)) {
+			return;
+		}
+
 		if(pos >= ARRAY_SIZE(ci->app)) {
 			return ;
 		}
@@ -173,6 +179,8 @@ static void analyze_file(MifareTag tag, struct mifare_desfire_file_information *
 	if(r == 1) {
 		fi->file_type = MIFARE_DESFIRE_FILE_TYPE_DATA;
 		fi->readable = 1;
+	} if(RFERROR(tag)) {
+		return;
 	}
 
 	switch(mifare_desfire_last_picc_error(tag)) {
@@ -219,10 +227,18 @@ static void try_keys(MifareTag tag, enum mifare_desfire_authentication_mode auth
 				}
 			}
 
+			if(RFERROR(tag)) {
+				goto skip;
+			}
+
 			if(ki[i].key_information_result == KEY_INFORMATION_RESULT_UNKNOWN && k3des != NULL) {
 				if(mifare_desfire_authenticate(tag, i, k3des) >= 0) {
 					ki[i].key_information_result = KEY_INFORMATION_RESULT_3DES;
 				}
+			}
+
+			if(RFERROR(tag)) {
+				goto skip;
 			}
 
 			if(ki[i].key_information_result == KEY_INFORMATION_RESULT_UNKNOWN && k3k3des != NULL) {
@@ -231,11 +247,17 @@ static void try_keys(MifareTag tag, enum mifare_desfire_authentication_mode auth
 				}
 			}
 
+			if(RFERROR(tag)) {
+				goto skip;
+			}
+
 			if(ki[i].key_information_result == KEY_INFORMATION_RESULT_UNKNOWN && kaes != NULL) {
 				if(mifare_desfire_authenticate(tag, i, kaes) >= 0) {
 					ki[i].key_information_result = KEY_INFORMATION_RESULT_AES;
 				}
 			}
+
+skip:
 
 			if(kdes != NULL) {
 				mifare_desfire_key_free(kdes);
@@ -254,6 +276,10 @@ static void try_keys(MifareTag tag, enum mifare_desfire_authentication_mode auth
 				memcpy(ki[i].key, WELL_KNOWN_KEYS[j].key, WELL_KNOWN_KEYS[j].key_length);
 				ki[i].key_length = WELL_KNOWN_KEYS[j].key_length;
 				break;
+			}
+
+			if(RFERROR(tag)) {
+				return;
 			}
 
 		}
@@ -330,16 +356,26 @@ static int analyze_app(MifareTag tag, struct mifare_desfire_application_informat
 	r = mifare_desfire_get_key_settings(tag, &ai->key_settings, &ai->max_keys);
 	if(r == 0) {
 		ai->key_settings_retrieved = 1;
+	} else if(RFERROR(tag)) {
+		goto abort;
 	}
 
 	// First determine the authentication mode
 	uint8_t auth_mode = 0;
 	r = try_auth(tag, 0x0a, 0);
+	if(RFERROR(tag)) {
+		goto abort;
+	}
+
 	if(r == TRY_KEY_RESULT_OK) {
 		ai->authentication_mode = MIFARE_DESFIRE_AUTHENTICATION_MODE_DES;
 		auth_mode = 0x0a;
 	} else {
 		r = try_auth(tag, 0xaa, 0);
+		if(RFERROR(tag)) {
+			goto abort;
+		}
+
 		if(r == TRY_KEY_RESULT_OK) {
 			ai->authentication_mode = MIFARE_DESFIRE_AUTHENTICATION_MODE_AES;
 			auth_mode = 0xaa;
@@ -354,12 +390,19 @@ static int analyze_app(MifareTag tag, struct mifare_desfire_application_informat
 				ai->max_keys = i;
 				break;
 			} else if(r != TRY_KEY_RESULT_OK) {
+				if(RFERROR(tag)) {
+					goto abort;
+				}
+
 				break;
 			}
 		}
 	}
 
 	try_keys(tag, ai->authentication_mode, ai->max_keys, ai->key_information);
+	if(RFERROR(tag)) {
+		goto abort;
+	}
 
 	r = mifare_desfire_get_file_ids(tag, &files, &count);
 	if(r >= 0) {
@@ -371,6 +414,10 @@ static int analyze_app(MifareTag tag, struct mifare_desfire_application_informat
 			ai->file[i].file_present = 1;
 		}
 	} else {
+		if(RFERROR(tag)) {
+			goto abort;
+		}
+
 		uint8_t tmp;
 		int pos = 0;
 		for(size_t i=0; i<ARRAY_SIZE(ai->file); i++) {
@@ -390,6 +437,10 @@ static int analyze_app(MifareTag tag, struct mifare_desfire_application_informat
 				break;
 			}
 
+			if(RFERROR(tag)) {
+				goto abort;
+			}
+
 			if(present) {
 				ai->file[pos].file_id = i;
 				ai->file[pos].file_present = 1;
@@ -403,6 +454,9 @@ static int analyze_app(MifareTag tag, struct mifare_desfire_application_informat
 			continue;
 		}
 		analyze_file(tag, ai->file + i);
+		if(RFERROR(tag)) {
+			goto abort;
+		}
 	}
 
 
@@ -430,26 +484,50 @@ static int analyze_tag(MifareTag tag, struct mifare_desfire_card_information *ci
 	int r = mifare_desfire_select_application(tag, NULL);
 	if(r >= 0) {
 		r = try_auth(tag, 0x0a, 0);
+		if(RFERROR(tag)) {
+			goto abort;
+		}
+
 		if(r == TRY_KEY_RESULT_OK) {
 			ci->authentication_mode = MIFARE_DESFIRE_AUTHENTICATION_MODE_DES;
 		} else {
 			r = try_auth(tag, 0xaa, 0);
+			if(RFERROR(tag)) {
+				goto abort;
+			}
+
 			if(r == TRY_KEY_RESULT_OK) {
 				ci->authentication_mode = MIFARE_DESFIRE_AUTHENTICATION_MODE_AES;
 			}
 		}
+	} else if(RFERROR(tag)) {
+		goto abort;
 	}
 
 	r = mifare_desfire_get_key_settings(tag, &ci->key_settings, &ci->max_keys);
 	if(r == 0) {
 		ci->key_settings_retrieved = 1;
+	} else if(RFERROR(tag)) {
+		goto abort;
 	}
 
 	try_keys(tag, ci->authentication_mode, 1, &(ci->key_information));
+	if(RFERROR(tag)) {
+		goto abort;
+	}
 
 	get_application_list(tag, ci);
+
+	if(RFERROR(tag)) {
+		goto abort;
+	}
+
 	if(!ci->aids_retrieved) {
 		try_well_known_aids(tag, ci);
+	}
+
+	if(RFERROR(tag)) {
+		goto abort;
 	}
 
 	for(size_t i=0; i<ARRAY_SIZE(ci->app); i++) {
@@ -457,6 +535,9 @@ static int analyze_tag(MifareTag tag, struct mifare_desfire_card_information *ci
 			continue;
 		}
 		analyze_app(tag, ci->app+i);
+		if(RFERROR(tag)) {
+			goto abort;
+		}
 	}
 
 abort:
