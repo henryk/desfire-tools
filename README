@@ -1,1 +1,6 @@
-Sample readme file for desfire-tools project.
+Some tools for the NXP Mifare DESfire card that I find myself needing.
+
+Until now only mifare-desfire-analyze is in here. Its mission is to
+find out as much as possible about a presented DESfire card (permissions,
+AIDs, files, keys) and print it. Some of the information may be
+willingly given out by the card, some of it can be brute-forced.
