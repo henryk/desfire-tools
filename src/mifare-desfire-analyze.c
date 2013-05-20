@@ -21,6 +21,7 @@
 #include <errno.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 
 #include <nfc/nfc.h>
 
@@ -31,6 +32,7 @@
 const uint32_t WELL_KNOWN_AIDS[] = {
 		0xFF77F0, 0xFF77F1, 0xFF77F2, 0xFF77F3, 0xFF77F4, 0xFF77F5, 0xFF77F6, 0xFF77F7, 0xFF77F8, 0xFF77F9, 0xFF77FA, 0xFF77FB, 0xFF77FC, 0xFF77FD, 0xFF77FE, 0xFF77FF, // OpenKey
 		0xFF77CF, // DOPE
+		0x000357, // Legic Advant, found in brute force
 };
 
 const struct {
@@ -157,6 +159,41 @@ static void try_well_known_aids(MifareTag tag, struct mifare_desfire_card_inform
 
 		if(mifare_desfire_select_application(tag, aid) >= 0) {
 			ci->app[pos++].aid = WELL_KNOWN_AIDS[i];
+		}
+		free(aid);
+
+		if(RFERROR(tag)) {
+			return;
+		}
+
+		if(pos >= ARRAY_SIZE(ci->app)) {
+			return ;
+		}
+	}
+}
+
+static void try_all_aids(MifareTag tag, struct mifare_desfire_card_information *ci)
+{
+	int pos = 0;
+	for(size_t i=0; i<ARRAY_SIZE(ci->app); i++) {
+		if(ci->app[i].aid == 0) {
+			pos = i;
+			break;
+		}
+	}
+
+	if(ci->app[pos].aid != 0) {
+		return;
+	}
+
+	for(uint32_t i=1; i<=0xFFFFFF; i++) {
+		MifareDESFireAID aid = mifare_desfire_aid_new(i);
+		if(aid == NULL) {
+			return;
+		}
+
+		if(mifare_desfire_select_application(tag, aid) >= 0) {
+			ci->app[pos++].aid = i;
 		}
 		free(aid);
 
@@ -469,7 +506,7 @@ abort:
 	return retval;
 }
 
-static int analyze_tag(MifareTag tag, struct mifare_desfire_card_information *ci)
+static int analyze_tag(MifareTag tag, struct mifare_desfire_card_information *ci, bool do_brute)
 {
 	int retval = -1;
 
@@ -523,7 +560,11 @@ static int analyze_tag(MifareTag tag, struct mifare_desfire_card_information *ci
 	}
 
 	if(!ci->aids_retrieved) {
-		try_well_known_aids(tag, ci);
+		if(do_brute) {
+			try_all_aids(tag, ci);
+		} else {
+			try_well_known_aids(tag, ci);
+		}
 	}
 
 	if(RFERROR(tag)) {
@@ -692,14 +733,40 @@ static void free_information(struct mifare_desfire_card_information *ci)
 	}
 }
 
+static void usage(const char *progname)
+{
+	fprintf(stderr, "Usage: %s [-B]\n"
+			"Options:\n"
+			"\t-B\tDo brute force on AIDs (may take a long time)\n\n", progname);
+}
+
 int main(int argc, char *argv[])
 {
 	int error = EXIT_SUCCESS;
 	nfc_device *device = NULL;
 	MifareTag *tags = NULL;
+	bool do_brute = 0, do_exit=0;
 
-	if(argc > 1) {
-		errx(EXIT_FAILURE, "usage: %s", argv[0]);
+	for(int opt; (opt = getopt(argc, argv, "B")) != -1; ) {
+		switch(opt) {
+		case 'B':
+			do_brute = 1;
+			break;
+		case '?':
+		default:
+			usage(argv[0]);
+			do_exit = 1;
+			break;
+		}
+	}
+
+	if(do_exit) {
+		return 0;
+	}
+
+	if(optind < argc) {
+		usage(argv[0]);
+		return 0;
 	}
 
 	nfc_connstring devices[8];
@@ -744,7 +811,7 @@ int main(int argc, char *argv[])
 			struct mifare_desfire_card_information ci;
 			memset(&ci, 0, sizeof(ci));
 
-			analyze_tag(tags[i], &ci);
+			analyze_tag(tags[i], &ci, do_brute);
 			print_information(&ci);
 			free_information(&ci);
 
