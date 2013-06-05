@@ -25,6 +25,9 @@
 							<tool id="org.eclipse.linuxtools.cdt.autotools.core.toolchain.tool.autogen.1744279550" name="autogen.sh" superClass="org.eclipse.linuxtools.cdt.autotools.core.toolchain.tool.autogen"/>
 							<tool id="org.eclipse.linuxtools.cdt.autotools.core.toolchain.tool.gcc.278896119" name="GCC C Compiler" superClass="org.eclipse.linuxtools.cdt.autotools.core.toolchain.tool.gcc">
 								<option id="gnu.c.compiler.option.misc.other.1937077402" name="Other flags" superClass="gnu.c.compiler.option.misc.other" value="-c -fmessage-length=0 -pthread" valueType="string"/>
+								<option id="gnu.c.compiler.option.include.paths.1860207203" superClass="gnu.c.compiler.option.include.paths" valueType="includePath">
+									<listOptionValue builtIn="false" value="/home/henryk/sw/stow/libnfc-git-20130604/include"/>
+								</option>
 								<inputType id="cdt.managedbuild.tool.gnu.c.compiler.input.218811074" superClass="cdt.managedbuild.tool.gnu.c.compiler.input"/>
 							</tool>
 							<tool id="org.eclipse.linuxtools.cdt.autotools.core.toolchain.tool.gpp.2102278126" name="GCC C++ Compiler" superClass="org.eclipse.linuxtools.cdt.autotools.core.toolchain.tool.gpp"/>
@@ -39,12 +42,12 @@
 				<externalSettings containerId="org.eclipse.cdt.managedbuilder.pkgconfig.extSettings" factoryId="org.eclipse.cdt.core.extension.container.factory">
 					<externalSetting contentTypes="org.eclipse.cdt.core.cSource:org.eclipse.cdt.core.cxxSource">
 						<entry flags="BUILTIN" kind="includePath" name="/home/henryk/sw/stow/libfreefare/include"/>
-						<entry flags="BUILTIN" kind="includePath" name="/home/henryk/sw/stow/libnfc-git-20130201/include"/>
+						<entry flags="BUILTIN" kind="includePath" name="/home/henryk/sw/stow/libnfc-git-20130604/include"/>
 						<entry flags="BUILTIN" kind="includePath" name="/usr/include/PCSC"/>
 					</externalSetting>
 					<externalSetting contentTypes="org.eclipse.cdt.managedbuilder.core.compiledObjectFile">
 						<entry flags="RESOLVED" kind="libraryPath" name="/home/henryk/sw/stow/libfreefare/lib"/>
-						<entry flags="RESOLVED" kind="libraryPath" name="/home/henryk/sw/stow/libnfc-git-20130201/lib"/>
+						<entry flags="RESOLVED" kind="libraryPath" name="/home/henryk/sw/stow/libnfc-git-20130604/lib"/>
 						<entry flags="UNDEFINED" kind="libraryFile" name="freefare" srcPrefixMapping="" srcRootPath=""/>
 						<entry flags="UNDEFINED" kind="libraryFile" name="nfc" srcPrefixMapping="" srcRootPath=""/>
 						<entry flags="UNDEFINED" kind="libraryFile" name="usb" srcPrefixMapping="" srcRootPath=""/>

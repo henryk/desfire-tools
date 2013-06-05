@@ -21,6 +21,7 @@
 #include <errno.h>
 #include <stdlib.h>
 #include <string.h>
+#include <ctype.h>
 #include <unistd.h>
 
 #include <nfc/nfc.h>
@@ -90,6 +91,9 @@ struct mifare_desfire_card_information {
 				MIFARE_DESFIRE_FILE_TYPE_VALUE,
 			} file_type;
 			size_t file_length;
+
+			uint8_t *file_contents;
+			size_t file_contents_length;
 		} file[32];
 
 		struct key_information key_information[14];
@@ -374,6 +378,89 @@ static enum try_key_result try_auth(MifareTag tag, uint8_t auth_mode, uint8_t ke
 	}
 }
 
+static int authenticate(MifareTag tag, struct mifare_desfire_application_information *ai, uint8_t key_no)
+{
+	MifareDESFireKey k;
+	int r;
+
+	switch(ai->key_information[key_no].key_information_result) {
+	case KEY_INFORMATION_RESULT_UNKNOWN:
+		return -1;
+	case KEY_INFORMATION_RESULT_DES:
+		k = mifare_desfire_des_key_new(ai->key_information[key_no].key);
+		break;
+	case KEY_INFORMATION_RESULT_3DES:
+		k = mifare_desfire_3des_key_new(ai->key_information[key_no].key);
+		break;
+	case KEY_INFORMATION_RESULT_3K3DES:
+		k = mifare_desfire_3k3des_key_new(ai->key_information[key_no].key);
+		break;
+	case KEY_INFORMATION_RESULT_AES:
+		k = mifare_desfire_aes_key_new(ai->key_information[key_no].key);
+		break;
+	}
+
+	r = mifare_desfire_authenticate(tag, key_no, k);
+	mifare_desfire_key_free(k);
+
+	return r;
+}
+
+static int read_file(MifareTag tag, struct mifare_desfire_file_information *fi)
+{
+	uint8_t buffer[32 + 32];
+	size_t buffer_length;
+
+	int cs = MDCM_ENCIPHERED;
+	int r = mifare_desfire_read_data_ex(tag, fi->file_id, 0, 1, buffer, cs);
+	if(RFERROR(tag)) {
+		return -1;
+	}
+
+	if(r < 0) {
+		cs = MDCM_MACED;
+		r = mifare_desfire_read_data_ex(tag, fi->file_id, 0, 1, buffer, cs);
+		if(RFERROR(tag)) {
+			return -1;
+		}
+	}
+
+	if(r < 0) {
+		cs = MDCM_PLAIN;
+		r = mifare_desfire_read_data_ex(tag, fi->file_id, 0, 1, buffer, cs);
+		if(RFERROR(tag)) {
+			return -1;
+		}
+	}
+
+	if(r < 0) {
+		return -1;
+	}
+
+	buffer_length = sizeof(buffer) -32;
+	while(buffer_length > 0) {
+		r = mifare_desfire_read_data_ex(tag, fi->file_id, fi->file_contents_length, buffer_length, buffer, cs);
+		if(RFERROR(tag)) {
+			return -1;
+		}
+		if(r > 0) {
+			void *old = fi->file_contents;
+			fi->file_contents = realloc(fi->file_contents, fi->file_contents_length + r);
+			if(fi->file_contents == NULL) {
+				if(old != NULL) {
+					free(old);
+				}
+				return -1;
+			}
+			memcpy(fi->file_contents + fi->file_contents_length, buffer, r);
+			fi->file_contents_length += r;
+		} else {
+			buffer_length /= 2;
+		}
+	}
+	return 0;
+}
+
 static int analyze_app(MifareTag tag, struct mifare_desfire_application_information *ai)
 {
 	int retval = -1;
@@ -494,6 +581,34 @@ static int analyze_app(MifareTag tag, struct mifare_desfire_application_informat
 		if(RFERROR(tag)) {
 			goto abort;
 		}
+	}
+
+	for(size_t i=0; i<ARRAY_SIZE(ai->file); i++) {
+		if(!ai->file[i].file_present) {
+			continue;
+		}
+
+		if(ai->file[i].file_type == MIFARE_DESFIRE_FILE_TYPE_DATA) {
+			if(ai->file[i].readable) {
+				read_file(tag, ai->file + i);
+				if(RFERROR(tag)) {
+					goto abort;
+				}
+			} else {
+				for(size_t j=0; j<ARRAY_SIZE(ai->key_information); j++) {
+					if(authenticate(tag, ai, j) >= 0) {
+						if(read_file(tag, ai->file + i) >= 0) {
+							ai->file[i].readable = 1;
+							break;
+						}
+					}
+					if(RFERROR(tag)) {
+						goto abort;
+					}
+				}
+			}
+		}
+
 	}
 
 
@@ -718,6 +833,27 @@ static void print_information(const struct mifare_desfire_card_information *ci)
 				printf("\t\t\t + File type value\n");
 				break;
 			}
+			if(ci->app[i].file[j].file_contents_length > 0) {
+				printf("\t\t\t + Read %zi bytes of data\n", ci->app[i].file[j].file_contents_length);
+				for(size_t off = 0; off < ci->app[i].file[j].file_contents_length; off += 16) {
+					printf("\t\t\t\t%04zX: ", off);
+					for(size_t ind = 0; ind < 16; ind++) {
+						if(off+ind >= ci->app[i].file[j].file_contents_length) {
+							break;
+						}
+						printf(" %02X", ci->app[i].file[j].file_contents[off+ind]);
+					}
+					printf("    ");
+					for(size_t ind = 0; ind < 16; ind++) {
+						if(off+ind >= ci->app[i].file[j].file_contents_length) {
+							break;
+						}
+						char c = ci->app[i].file[j].file_contents[off+ind];
+						printf("%c", isprint(c)?c:',');
+					}
+					printf("\n");
+				}
+			}
 		}
 	}
 }
@@ -726,6 +862,14 @@ static void free_information(struct mifare_desfire_card_information *ci)
 {
 	if(ci == NULL) {
 		return;
+	}
+
+	for(size_t i=0; i<ARRAY_SIZE(ci->app); i++) {
+		for(size_t j=0; j<ARRAY_SIZE(ci->app[i].file); j++) {
+			if(ci->app[i].file[j].file_contents != NULL) {
+				free(ci->app[i].file[j].file_contents);
+			}
+		}
 	}
 
 	if(ci->uid != NULL) {
